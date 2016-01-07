@@ -1,0 +1,159 @@
+　对于SMTP不了解或Java Socket不了解的，请移步百度搜索。
+
+　　邮件协议是匿名协议，我们通过SMTP协议可以让邮件服务器来验证目标地址是否真实存在。
+
+代码实现
+
+ 
+
+　　由以上介绍可知：通过DNS中MX记录可以找到邮件服务器地址，通过SMTP协议可以让邮件服务器验证目标邮箱地址的真实性。
+
+　　那么我们就来进行编码实现。
+
+　　首先需要查询DNS，这个需要用到一个Java查询DNS的组件dnsjava(下载)，自己写太麻烦。
+
+ mx
+　　(上面代码中的生僻类型就是来自dnsjava，我使用apache-commons组件来判断空值和构建排序，return false是在查询失败时。)
+
+　　接下来通过优先级排序(mx记录有这个属性)取第一个邮件服务器地址来链接。
+
+　　这里的主要代码是通过SMTP发送RCPT TO指令来指定邮件接收方，如果这个地址存在则服务器返回成功状态，如果没有的话则返回错误指令。
+
+复制代码
+  1 import java.io.BufferedInputStream;
+  2 import java.io.BufferedReader;
+  3 import java.io.BufferedWriter;
+  4 import java.io.IOException;
+  5 import java.io.InputStreamReader;
+  6 import java.io.OutputStreamWriter;
+  7 import java.net.InetSocketAddress;
+  8 import java.net.Socket;
+  9 import java.util.ArrayList;
+ 10 import java.util.Collections;
+ 11 import java.util.Comparator;
+ 12 import java.util.List;
+ 13 
+ 14 import org.apache.commons.lang.ArrayUtils;
+ 15 import org.apache.commons.lang.StringUtils;
+ 16 import org.apache.commons.lang.builder.CompareToBuilder;
+ 17 import org.xbill.DNS.Lookup;
+ 18 import org.xbill.DNS.MXRecord;
+ 19 import org.xbill.DNS.Record;
+ 20 import org.xbill.DNS.TextParseException;
+ 21 import org.xbill.DNS.Type;
+ 22 
+ 23 
+ 24 public class MailValid {
+ 25 
+ 26     public static void main(String[] args) {
+ 27         System.out.println(new MailValid().valid("100582783@qq.com", "jootmir.org"));
+ 28     }
+ 29     
+ 30     /**
+ 31      * 验证邮箱是否存在
+ 32      * <br>
+ 33      * 由于要读取IO，会造成线程阻塞
+ 34      * 
+ 35      * @param toMail
+ 36      *         要验证的邮箱
+ 37      * @param domain
+ 38      *         发出验证请求的域名(是当前站点的域名，可以任意指定)
+ 39      * @return
+ 40      *         邮箱是否可达
+ 41      */
+ 42     public boolean valid(String toMail, String domain) {
+ 43         if(StringUtils.isBlank(toMail) || StringUtils.isBlank(domain)) return false;
+ 44         if(!StringUtils.contains(toMail, '@')) return false;
+ 45         String host = toMail.substring(toMail.indexOf('@') + 1);
+ 46         if(host.equals(domain)) return false;
+ 47         Socket socket = new Socket();
+ 48         try {
+ 49             // 查找mx记录
+ 50             Record[] mxRecords = new Lookup(host, Type.MX).run();
+ 51             if(ArrayUtils.isEmpty(mxRecords)) return false;
+ 52             // 邮件服务器地址
+ 53             String mxHost = ((MXRecord)mxRecords[0]).getTarget().toString();
+ 54             if(mxRecords.length > 1) { // 优先级排序
+ 55                 List<Record> arrRecords = new ArrayList<Record>();
+ 56                 Collections.addAll(arrRecords, mxRecords);
+ 57                 Collections.sort(arrRecords, new Comparator<Record>() {
+ 58                     
+ 59                     public int compare(Record o1, Record o2) {
+ 60                         return new CompareToBuilder().append(((MXRecord)o1).getPriority(), ((MXRecord)o2).getPriority()).toComparison();
+ 61                     }
+ 62                     
+ 63                 });
+ 64                 mxHost = ((MXRecord)arrRecords.get(0)).getTarget().toString();
+ 65             }
+ 66             // 开始smtp
+ 67             socket.connect(new InetSocketAddress(mxHost, 25));
+ 68             BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(new BufferedInputStream(socket.getInputStream())));
+ 69             BufferedWriter bufferedWriter = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+ 70             // 超时时间(毫秒)
+ 71             long timeout = 6000;
+ 72             // 睡眠时间片段(50毫秒)
+ 73             int sleepSect = 50;
+ 74             
+ 75             // 连接(服务器是否就绪)
+ 76             if(getResponseCode(timeout, sleepSect, bufferedReader) != 220) {
+ 77                 return false;
+ 78             }
+ 79             
+ 80             // 握手
+ 81             bufferedWriter.write("HELO " + domain + "\r\n");
+ 82             bufferedWriter.flush();
+ 83             if(getResponseCode(timeout, sleepSect, bufferedReader) != 250) {
+ 84                 return false;
+ 85             }
+ 86             // 身份
+ 87             bufferedWriter.write("MAIL FROM: <check@" + domain + ">\r\n");
+ 88             bufferedWriter.flush();
+ 89             if(getResponseCode(timeout, sleepSect, bufferedReader) != 250) {
+ 90                 return false;
+ 91             }
+ 92             // 验证
+ 93             bufferedWriter.write("RCPT TO: <" + toMail + ">\r\n");
+ 94             bufferedWriter.flush();
+ 95             if(getResponseCode(timeout, sleepSect, bufferedReader) != 250) {
+ 96                 return false;
+ 97             }
+ 98             // 断开
+ 99             bufferedWriter.write("QUIT\r\n");
+100             bufferedWriter.flush();
+101             return true;
+102         } catch (NumberFormatException e) {
+103         } catch (TextParseException e) {
+104         } catch (IOException e) {
+105         } catch (InterruptedException e) {
+106         } finally {
+107             try {
+108                 socket.close();
+109             } catch (IOException e) {
+110             }
+111         }
+112         return false;
+113     }
+114     
+115     private int getResponseCode(long timeout, int sleepSect, BufferedReader bufferedReader) throws InterruptedException, NumberFormatException, IOException {
+116         int code = 0;
+117         for(long i = sleepSect; i < timeout; i += sleepSect) {
+118             Thread.sleep(sleepSect);
+119             if(bufferedReader.ready()) {
+120                 String outline = bufferedReader.readLine();
+121                 // FIXME 读完……
+122                 while(bufferedReader.ready())
+123                     /*System.out.println(*/bufferedReader.readLine()/*)*/;
+124                 /*System.out.println(outline);*/
+125                 code = Integer.parseInt(outline.substring(0, 3));
+126                 break;
+127             }
+128         }
+129         return code;
+130     }
+131 }
+复制代码
+ 
+
+　　(解锁和输出123、124行数据可以让你更加清晰SMTP协议)
+
+　　对于企业邮箱，可能无法正常验证，这个是因为服务器问题。另外，dnsjava查询DNS是有缓存的。
